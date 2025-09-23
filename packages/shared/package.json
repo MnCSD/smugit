@@ -1,0 +1,19 @@
+{
+  "name": "@smugit/shared",
+  "version": "0.1.0",
+  "description": "Smugit Shared - Common utilities and types across packages",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "test": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/**/*.ts"
+  },
+  "dependencies": {
+    "zod": "^3.0.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0"
+  }
+}

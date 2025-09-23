@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "preserve",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "@smugit/shared/*": ["packages/shared/src/*"],
+      "@smugit/cli/*": ["packages/cli/src/*"],
+      "@smugit/api/*": ["packages/api/src/*"],
+      "@smugit/web/*": ["packages/web/src/*"]
+    }
+  },
+  "exclude": ["node_modules", "dist", "build"]
+}

@@ -1,0 +1,32 @@
+{
+  "name": "@smugit/api",
+  "version": "0.1.0",
+  "description": "Smugit API - Backend services for Git analysis and team features",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsup src/server.ts src/index.ts --format cjs,esm --dts",
+    "start": "node dist/server.js",
+    "test": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/**/*.ts"
+  },
+  "dependencies": {
+    "fastify": "^4.0.0",
+    "@fastify/cors": "^9.0.0",
+    "@fastify/swagger": "^8.0.0",
+    "@fastify/swagger-ui": "^2.0.0",
+    "simple-git": "^3.0.0",
+    "ioredis": "^5.0.0",
+    "pg": "^8.0.0",
+    "drizzle-orm": "^0.29.0",
+    "zod": "^3.0.0",
+    "dotenv": "^16.0.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.0.0",
+    "drizzle-kit": "^0.20.0",
+    "tsx": "^4.0.0",
+    "tsup": "^8.0.0"
+  }
+}
