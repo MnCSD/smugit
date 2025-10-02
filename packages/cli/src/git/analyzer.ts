@@ -83,6 +83,11 @@ export class GitAnalyzer {
     const hunks = this.parseConflictHunks(content);
     const type = this.detectConflictType(filePath, content);
     const complexity = this.determineOverallComplexity(hunks);
+    const baseAutoResolvable = isAutoResolvable(type, complexity);
+    const contentAutoResolvable =
+      type === ConflictType.CONTENT && complexity !== ConflictComplexity.COMPLEX
+        ? this.canAutoResolveContent(hunks)
+        : false;
 
     return {
       file: filePath,
@@ -95,7 +100,7 @@ export class GitAnalyzer {
         hunks.map(h => h.currentContent).join('\n'),
         hunks.map(h => h.incomingContent).join('\n')
       ),
-      autoResolvable: isAutoResolvable(type, complexity),
+      autoResolvable: baseAutoResolvable || contentAutoResolvable,
     };
   }
 
@@ -219,6 +224,102 @@ export class GitAnalyzer {
     if (complexities.includes(ConflictComplexity.MODERATE)) return ConflictComplexity.MODERATE;
     if (complexities.includes(ConflictComplexity.SIMPLE)) return ConflictComplexity.SIMPLE;
     return ConflictComplexity.TRIVIAL;
+  }
+
+  private canAutoResolveContent(hunks: ConflictHunk[]): boolean {
+    return hunks.every(hunk => this.isSimpleContentPattern(hunk));
+  }
+
+  private isSimpleContentPattern(hunk: ConflictHunk): boolean {
+    const trimmedCurrent = hunk.currentContent.trim();
+    const trimmedIncoming = hunk.incomingContent.trim();
+
+    if (!trimmedCurrent || !trimmedIncoming) {
+      return true;
+    }
+
+    if (trimmedCurrent === trimmedIncoming) {
+      return true;
+    }
+
+    const normalizedCurrent = trimmedCurrent.replace(/\s+/g, ' ');
+    const normalizedIncoming = trimmedIncoming.replace(/\s+/g, ' ');
+
+    if (normalizedCurrent === normalizedIncoming) {
+      return true;
+    }
+
+    const currentLines = this.splitLines(hunk.currentContent);
+    const incomingLines = this.splitLines(hunk.incomingContent);
+
+    if (this.isSubsetLines(currentLines, incomingLines) || this.isSubsetLines(incomingLines, currentLines)) {
+      return true;
+    }
+
+    if (this.isLikelyList(currentLines) && this.isLikelyList(incomingLines)) {
+      return true;
+    }
+
+    if (this.isKeyValueBlock(currentLines) && this.isKeyValueBlock(incomingLines)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private splitLines(content: string): string[] {
+    return content.split('\n');
+  }
+
+  private isSubsetLines(source: string[], target: string[]): boolean {
+    const targetSet = new Set(target.map(line => line.trim()).filter(Boolean));
+    const meaningfulSource = source.map(line => line.trim()).filter(Boolean);
+
+    if (meaningfulSource.length === 0) {
+      return true;
+    }
+
+    return meaningfulSource.every(line => targetSet.has(line));
+  }
+
+  private isLikelyList(lines: string[]): boolean {
+    const bulletPattern = /^\s*(?:[-*+]|\d+\.)\s+/;
+    let hasEntries = false;
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+
+      if (!bulletPattern.test(trimmed)) {
+        return false;
+      }
+
+      hasEntries = true;
+    }
+
+    return hasEntries;
+  }
+
+  private isKeyValueBlock(lines: string[]): boolean {
+    const kvPattern = /^\s*["']?[\w.-]+["']?\s*[:=]/;
+    let hasEntries = false;
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+
+      if (!kvPattern.test(trimmed)) {
+        return false;
+      }
+
+      hasEntries = true;
+    }
+
+    return hasEntries;
   }
 
   /**

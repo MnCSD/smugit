@@ -14,6 +14,10 @@
     "lint": "eslint src/**/*.ts"
   },
   "dependencies": {
+    "@babel/generator": "^7.28.3",
+    "@babel/parser": "^7.28.4",
+    "@babel/traverse": "^7.28.4",
+    "@babel/types": "^7.28.4",
     "boxen": "^7.0.0",
     "chalk": "^5.0.0",
     "commander": "^11.0.0",
@@ -22,6 +26,8 @@
     "simple-git": "^3.0.0"
   },
   "devDependencies": {
+    "@types/babel__generator": "^7.27.0",
+    "@types/babel__traverse": "^7.28.0",
     "@types/inquirer": "^9.0.9",
     "tsup": "^8.0.0",
     "tsx": "^4.0.0"

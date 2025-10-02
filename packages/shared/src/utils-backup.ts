@@ -6,6 +6,7 @@ import { ConflictComplexity, ConflictType } from './types';
 const TRIVIAL_AUTO_TYPES = new Set<ConflictType>([
   ConflictType.WHITESPACE,
   ConflictType.IMPORT,
+  ConflictType.STRUCTURAL,
 ]);
 
 export function isAutoResolvable(type: ConflictType, complexity: ConflictComplexity): boolean {
@@ -15,7 +16,8 @@ export function isAutoResolvable(type: ConflictType, complexity: ConflictComplex
 
   if (complexity === ConflictComplexity.SIMPLE &&
       (type === ConflictType.WHITESPACE ||
-       type === ConflictType.IMPORT)) {
+       type === ConflictType.IMPORT ||
+       type === ConflictType.STRUCTURAL)) {
     return true;
   }
 

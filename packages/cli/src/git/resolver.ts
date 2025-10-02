@@ -1,58 +1,114 @@
 import simpleGit, { SimpleGit } from 'simple-git';
-import { GitConflict, ConflictType, ConflictComplexity } from '@smugit/shared';
+import { GitConflict, ConflictHunk } from '@smugit/shared';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+
+import { builtinPlugins } from './plugins/builtin';
+import {
+  getConflictResolutionPlugins,
+  registerConflictResolutionPlugin,
+} from './plugins/registry';
+import {
+  ConflictResolutionPlugin,
+  ConflictResolutionContext,
+  PluginResolution,
+} from './plugins/types';
 
 export interface ResolutionResult {
   success: boolean;
   resolvedFiles: string[];
   failedFiles: string[];
   errors: string[];
+  fallbackApplied: { file: string; strategy: 'incoming' | 'current' | 'both' }[];
+  warnings: string[];
+  notes: string[];
+  resolvedBy: { file: string; plugin: string; notes?: string[] }[];
 }
 
-export interface ResolutionStrategy {
-  type: ConflictType;
-  complexity: ConflictComplexity;
-  resolver: (conflict: GitConflict) => Promise<string>;
+let builtinsRegistered = false;
+
+function ensureBuiltinPluginsRegistered(): void {
+  if (!builtinsRegistered) {
+    builtinPlugins.forEach(registerConflictResolutionPlugin);
+    builtinsRegistered = true;
+  }
 }
 
 export class ConflictResolver {
   private git: SimpleGit;
   private repoPath: string;
-  private strategies: ResolutionStrategy[];
 
   constructor(repoPath: string = process.cwd()) {
     this.repoPath = repoPath;
     this.git = simpleGit(repoPath);
-    this.strategies = this.initializeStrategies();
+    ensureBuiltinPluginsRegistered();
   }
 
-  /**
-   * Auto-resolves conflicts that are deemed safe
-   */
-  async autoResolveConflicts(conflicts: GitConflict[], dryRun: boolean = true): Promise<ResolutionResult> {
+  async autoResolveConflicts(
+    conflicts: GitConflict[],
+    dryRun: boolean = true,
+    fallback: 'incoming' | 'current' | 'both' | 'none' = 'incoming'
+  ): Promise<ResolutionResult> {
     const result: ResolutionResult = {
       success: true,
       resolvedFiles: [],
       failedFiles: [],
       errors: [],
+      fallbackApplied: [],
+      warnings: [],
+      notes: [],
+      resolvedBy: [],
     };
 
+    const fallbackStrategy = fallback === 'none' ? undefined : fallback;
+    const plugins = getConflictResolutionPlugins();
+    const context = this.createContext();
+
     for (const conflict of conflicts) {
-      if (!conflict.autoResolvable) {
-        continue;
-      }
-
       try {
-        const resolvedContent = await this.resolveConflict(conflict);
+        const pluginOutcome = await this.runPlugins(conflict, plugins, context);
 
-        if (!dryRun) {
-          await this.writeResolvedFile(conflict.file, resolvedContent);
+        if (pluginOutcome) {
+          if (!dryRun) {
+            await this.writeResolvedFile(conflict.file, pluginOutcome.content);
+          }
+
           result.resolvedFiles.push(conflict.file);
-        } else {
-          // In dry run, just validate that we can resolve it
-          result.resolvedFiles.push(conflict.file);
+          result.resolvedBy.push({
+            file: conflict.file,
+            plugin: pluginOutcome.plugin.name,
+            notes: pluginOutcome.notes,
+          });
+
+          pluginOutcome.notes?.forEach(note => {
+            result.notes.push(`${conflict.file}: ${note}`);
+          });
+
+          continue;
         }
+
+        if (fallbackStrategy) {
+          const fallbackContent = await this.applyFallbackStrategy(conflict, fallbackStrategy);
+
+          if (fallbackContent) {
+            if (!dryRun) {
+              await this.writeResolvedFile(conflict.file, fallbackContent);
+            }
+
+            result.resolvedFiles.push(conflict.file);
+            result.fallbackApplied.push({ file: conflict.file, strategy: fallbackStrategy });
+
+            result.warnings.push(
+              `Applied fallback strategy "${fallbackStrategy}" to ${conflict.file}. Review before committing.`
+            );
+
+            continue;
+          }
+        }
+
+        result.failedFiles.push(conflict.file);
+        result.errors.push(`No automated strategy matched ${conflict.file}.`);
+        result.success = false;
       } catch (error) {
         result.failedFiles.push(conflict.file);
         result.errors.push(`Failed to resolve ${conflict.file}: ${error}`);
@@ -63,189 +119,6 @@ export class ConflictResolver {
     return result;
   }
 
-  /**
-   * Resolves a single conflict using appropriate strategy
-   */
-  private async resolveConflict(conflict: GitConflict): Promise<string> {
-    const strategy = this.findStrategy(conflict.type, conflict.complexity);
-
-    if (!strategy) {
-      throw new Error(`No resolution strategy found for ${conflict.type} conflict with ${conflict.complexity} complexity`);
-    }
-
-    return await strategy.resolver(conflict);
-  }
-
-  /**
-   * Finds appropriate resolution strategy
-   */
-  private findStrategy(type: ConflictType, complexity: ConflictComplexity): ResolutionStrategy | undefined {
-    return this.strategies.find(s => s.type === type && s.complexity === complexity);
-  }
-
-  /**
-   * Initializes conflict resolution strategies
-   */
-  private initializeStrategies(): ResolutionStrategy[] {
-    return [
-      {
-        type: ConflictType.WHITESPACE,
-        complexity: ConflictComplexity.TRIVIAL,
-        resolver: this.resolveWhitespaceConflict.bind(this),
-      },
-      {
-        type: ConflictType.WHITESPACE,
-        complexity: ConflictComplexity.SIMPLE,
-        resolver: this.resolveWhitespaceConflict.bind(this),
-      },
-      {
-        type: ConflictType.IMPORT,
-        complexity: ConflictComplexity.TRIVIAL,
-        resolver: this.resolveImportConflict.bind(this),
-      },
-      {
-        type: ConflictType.IMPORT,
-        complexity: ConflictComplexity.SIMPLE,
-        resolver: this.resolveImportConflict.bind(this),
-      },
-    ];
-  }
-
-  /**
-   * Resolves whitespace conflicts by normalizing whitespace
-   */
-  private async resolveWhitespaceConflict(conflict: GitConflict): Promise<string> {
-    const filePath = path.join(this.repoPath, conflict.file);
-    const content = await fs.readFile(filePath, 'utf-8');
-
-    let resolvedContent = content;
-
-    for (const hunk of conflict.hunks) {
-      // For whitespace conflicts, prefer the incoming content but normalize whitespace
-      const normalizedIncoming = this.normalizeWhitespace(hunk.incomingContent);
-
-      // Replace the entire conflict block with normalized content
-      const conflictPattern = new RegExp(
-        `${this.escapeRegExp(hunk.conflictMarkers.start)}[\\s\\S]*?${this.escapeRegExp(hunk.conflictMarkers.end)}`,
-        'g'
-      );
-
-      resolvedContent = resolvedContent.replace(conflictPattern, normalizedIncoming);
-    }
-
-    return resolvedContent;
-  }
-
-  /**
-   * Resolves import conflicts by merging and sorting imports
-   */
-  private async resolveImportConflict(conflict: GitConflict): Promise<string> {
-    const filePath = path.join(this.repoPath, conflict.file);
-    const content = await fs.readFile(filePath, 'utf-8');
-
-    let resolvedContent = content;
-
-    for (const hunk of conflict.hunks) {
-      const currentImports = this.extractImports(hunk.currentContent);
-      const incomingImports = this.extractImports(hunk.incomingContent);
-
-      // Merge and deduplicate imports
-      const mergedImports = this.mergeImports(currentImports, incomingImports);
-      const sortedImports = this.sortImports(mergedImports);
-
-      // Replace conflict block with merged imports
-      const conflictPattern = new RegExp(
-        `${this.escapeRegExp(hunk.conflictMarkers.start)}[\\s\\S]*?${this.escapeRegExp(hunk.conflictMarkers.end)}`,
-        'g'
-      );
-
-      resolvedContent = resolvedContent.replace(conflictPattern, sortedImports.join('\n'));
-    }
-
-    return resolvedContent;
-  }
-
-  /**
-   * Normalizes whitespace in content
-   */
-  private normalizeWhitespace(content: string): string {
-    return content
-      .replace(/\t/g, '  ') // Convert tabs to 2 spaces
-      .replace(/[ ]+$/gm, '') // Remove trailing spaces
-      .replace(/\n{3,}/g, '\n\n'); // Limit consecutive newlines to 2
-  }
-
-  /**
-   * Extracts import statements from code
-   */
-  private extractImports(content: string): string[] {
-    const imports: string[] = [];
-    const lines = content.split('\n');
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith('import ') || trimmed.startsWith('const ') && trimmed.includes('require(')) {
-        imports.push(trimmed);
-      }
-    }
-
-    return imports;
-  }
-
-  /**
-   * Merges two sets of imports, removing duplicates
-   */
-  private mergeImports(current: string[], incoming: string[]): string[] {
-    const seen = new Set<string>();
-    const merged: string[] = [];
-
-    // Add all unique imports
-    for (const imp of [...current, ...incoming]) {
-      const normalized = imp.replace(/\s+/g, ' ').trim();
-      if (!seen.has(normalized)) {
-        seen.add(normalized);
-        merged.push(imp);
-      }
-    }
-
-    return merged;
-  }
-
-  /**
-   * Sorts imports by type and alphabetically
-   */
-  private sortImports(imports: string[]): string[] {
-    return imports.sort((a, b) => {
-      // Sort by import type first (external libs before relative)
-      const aIsExternal = !a.includes('./') && !a.includes('../');
-      const bIsExternal = !b.includes('./') && !b.includes('../');
-
-      if (aIsExternal && !bIsExternal) return -1;
-      if (!aIsExternal && bIsExternal) return 1;
-
-      // Then sort alphabetically
-      return a.localeCompare(b);
-    });
-  }
-
-  /**
-   * Escapes special regex characters
-   */
-  private escapeRegExp(string: string): string {
-    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
-
-  /**
-   * Writes resolved content to file
-   */
-  private async writeResolvedFile(filePath: string, content: string): Promise<void> {
-    const fullPath = path.join(this.repoPath, filePath);
-    await fs.writeFile(fullPath, content, 'utf-8');
-  }
-
-  /**
-   * Creates a checkpoint branch before making changes
-   */
   async createCheckpoint(branchName?: string): Promise<string> {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const checkpointBranch = branchName || `smugit-checkpoint-${timestamp}`;
@@ -254,12 +127,123 @@ export class ConflictResolver {
     return checkpointBranch;
   }
 
-  /**
-   * Stages resolved files
-   */
   async stageResolvedFiles(files: string[]): Promise<void> {
     for (const file of files) {
       await this.git.add(file);
     }
   }
+
+  private async runPlugins(
+    conflict: GitConflict,
+    plugins: ConflictResolutionPlugin[],
+    context: ConflictResolutionContext
+  ): Promise<
+    | {
+        content: string;
+        plugin: ConflictResolutionPlugin;
+        notes?: string[];
+      }
+    | undefined
+  > {
+    for (const plugin of plugins) {
+      if (!plugin.supports(conflict)) {
+        continue;
+      }
+
+      const resolution: PluginResolution | null = await plugin.resolve(conflict, context);
+      if (resolution) {
+        return {
+          content: resolution.content,
+          plugin,
+          notes: resolution.notes,
+        };
+      }
+    }
+
+    return undefined;
+  }
+
+  private createContext(): ConflictResolutionContext {
+    return {
+      repoPath: this.repoPath,
+      readFile: (filePath: string) => this.readFile(filePath),
+    };
+  }
+
+  private async applyFallbackStrategy(
+    conflict: GitConflict,
+    strategy: 'incoming' | 'current' | 'both'
+  ): Promise<string | undefined> {
+    const content = await this.readFile(conflict.file);
+    let resolvedContent = content;
+
+    for (const hunk of conflict.hunks) {
+      let replacement: string;
+
+      switch (strategy) {
+        case 'incoming':
+          replacement = hunk.incomingContent;
+          break;
+        case 'current':
+          replacement = hunk.currentContent;
+          break;
+        case 'both':
+          replacement = this.combineBothVersions(hunk);
+          break;
+        default:
+          return undefined;
+      }
+
+      const conflictPattern = new RegExp(
+        `${escapeRegExp(hunk.conflictMarkers.start)}[\\s\\S]*?${escapeRegExp(hunk.conflictMarkers.end)}`,
+        's'
+      );
+
+      resolvedContent = resolvedContent.replace(conflictPattern, replacement);
+    }
+
+    return resolvedContent;
+  }
+
+  private combineBothVersions(hunk: ConflictHunk): string {
+    const segments: string[] = [];
+    const seen = new Set<string>();
+
+    const push = (segment: string) => {
+      if (!segment.trim()) {
+        return;
+      }
+
+      const normalized = segment.replace(/\s+/g, ' ').trim();
+      if (seen.has(normalized)) {
+        return;
+      }
+
+      seen.add(normalized);
+      segments.push(segment.trimEnd());
+    };
+
+    push(hunk.currentContent);
+    push(hunk.incomingContent);
+
+    if (segments.length === 0) {
+      return '';
+    }
+
+    return segments.join('\n');
+  }
+
+  private async readFile(filePath: string): Promise<string> {
+    const fullPath = path.join(this.repoPath, filePath);
+    return fs.readFile(fullPath, 'utf-8');
+  }
+
+  private async writeResolvedFile(filePath: string, content: string): Promise<void> {
+    const fullPath = path.join(this.repoPath, filePath);
+    await fs.writeFile(fullPath, content, 'utf-8');
+  }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
